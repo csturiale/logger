@@ -3,139 +3,161 @@ package logger
 import (
 	"fmt"
 	configuration "github.com/csturiale/config-mgtm"
-	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"net/url"
 
 	"gopkg.in/natefinch/lumberjack.v2"
-	"io"
 	logging "log"
 	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 )
 
 const logExtension = ".log"
 
 var (
-	log               *logrus.Logger
+	log               *zap.SugaredLogger
 	logFolder         = getString("log.folder")
 	enableFileLogging = getBoolOrDefault("log.file.enable", true)
 	filename          = getStringOrDefault("log.file.name", fmt.Sprintf("%s%s", "application", logExtension))
 )
 
+type lumberjackSink struct {
+	*lumberjack.Logger
+}
+
+func (lumberjackSink) Sync() error {
+	return nil
+}
+
 func init() {
 	if !strings.HasSuffix(filename, logExtension) {
 		filename = fmt.Sprintf("%s%s", filename, logExtension)
 	}
-	log = logrus.New()
-	//log.SetFormatter(&logrus.TextFormatter{})
-	log.SetFormatter(&Formatter{})
-	log.SetLevel(getLogLevel())
-	var mw io.Writer = os.Stdout
+
+	outputPaths := []string{"stdout"}
+
+	errorPaths := []string{"stderr"}
+
 	if enableFileLogging {
 		err := os.MkdirAll(logFolder, os.ModePerm)
 		if err != nil {
 			logging.Fatalf("Error creating log folder: %v", err)
 		}
 
-		mw = io.MultiWriter(os.Stdout, &lumberjack.Logger{
+		ll := lumberjack.Logger{
 			Filename:   fmt.Sprintf("%s/%s", logFolder, filename),
 			MaxSize:    configuration.GetIntOrDefault("log.file.maxSize", 10),     // Max size in MB
 			MaxBackups: configuration.GetIntOrDefault("log.file.maxBackups", 3),   // Max number of old log files to keep
 			MaxAge:     configuration.GetIntOrDefault("log.file.maxAge", 28),      // Max age in days to keep a log file
 			Compress:   configuration.GetBoolOrDefault("log.file.compress", true), // Compress old log files
+		}
+		err = zap.RegisterSink("lumberjack", func(*url.URL) (zap.Sink, error) {
+			return lumberjackSink{
+				Logger: &ll,
+			}, nil
 		})
+		if err != nil {
+			panic(fmt.Sprintf("build zap logger from config error: %v", err))
+		}
+		outputPaths = append(outputPaths, fmt.Sprintf("lumberjack:%s", fmt.Sprintf("%s/%s", logFolder, filename)))
 	}
-	log.SetOutput(mw)
+
+	cfg := zap.Config{
+		Encoding:         "console",
+		Level:            zap.NewAtomicLevelAt(getLogLevel()),
+		OutputPaths:      outputPaths,
+		ErrorOutputPaths: errorPaths,
+		Development:      getBoolOrDefault("log.dev", false),
+		EncoderConfig: zapcore.EncoderConfig{
+			LevelKey:      "level",
+			TimeKey:       "time",
+			EncodeTime:    zapcore.ISO8601TimeEncoder,
+			CallerKey:     "caller",
+			EncodeCaller:  zapcore.ShortCallerEncoder,
+			NameKey:       "logger",
+			MessageKey:    "msg",
+			StacktraceKey: "stacktrace",
+			LineEnding:    zapcore.DefaultLineEnding,
+			//EncodeLevel:    zapcore.LowercaseLevelEncoder,
+			EncodeLevel:    zapcore.CapitalColorLevelEncoder,
+			EncodeDuration: zapcore.SecondsDurationEncoder,
+		},
+	}
+	logger, err := cfg.Build(zap.AddCallerSkip(1))
+	if err != nil {
+		panic(fmt.Sprintf("build zap logger from config error: %v", err))
+	}
+	defer logger.Sync() // flushes buffer, if any
+	log = logger.Sugar()
 }
 
 // Info ...
 func Info(v ...interface{}) {
-	fields := getFields(runtime.Caller(1))
-	log.WithFields(fields).Infoln(v...)
+	log.Infoln(v...)
 }
 
 // Warn ...
 func Warn(v ...interface{}) {
-	fields := getFields(runtime.Caller(1))
-	log.WithFields(fields).Warnln(v...)
+	log.Warnln(v...)
 }
 
 // Debug ...
 func Debug(v ...interface{}) {
-	fields := getFields(runtime.Caller(1))
-	log.WithFields(fields).Debugln(v...)
+	log.Debugln(v...)
 }
 
 // Trace ...
 func Trace(v ...interface{}) {
-	fields := getFields(runtime.Caller(1))
-	log.WithFields(fields).Traceln(v...)
+	log.Debugln(v...)
 }
 
 // Error ...
 func Error(v ...interface{}) {
-	fields := getFields(runtime.Caller(1))
-	log.WithFields(fields).Errorln(v...)
+	log.Errorln(v...)
 }
 
 // Fatal ...
 func Fatal(v ...interface{}) {
-	fields := getFields(runtime.Caller(1))
-	log.WithFields(fields).Fatalln(v...)
+	log.Fatalln(v...)
 }
 
 // Infof ...
 func Infof(format string, v ...interface{}) {
-	fields := getFields(runtime.Caller(1))
-	log.WithFields(fields).Infof(format, v...)
+	log.Infof(format, v...)
 }
 
 // Warnf ...
 func Warnf(format string, v ...interface{}) {
-	fields := getFields(runtime.Caller(1))
-	log.WithFields(fields).Warnf(format, v...)
+	log.Warnf(format, v...)
 }
 
 // Debugf ...
 func Debugf(format string, v ...interface{}) {
-	fields := getFields(runtime.Caller(1))
-	log.WithFields(fields).Debugf(format, v...)
+	log.Debugf(format, v...)
 }
 
 // Tracef ...
 func Tracef(format string, v ...interface{}) {
-	fields := getFields(runtime.Caller(1))
-	log.WithFields(fields).Tracef(format, v...)
+	log.Debugf(format, v...)
 }
 
 // Errorf ...
 func Errorf(format string, v ...interface{}) {
-	fields := getFields(runtime.Caller(1))
-	log.WithFields(fields).Errorf(format, v...)
+	log.Errorf(format, v...)
 }
 
 // Fatalf ...
 func Fatalf(format string, v ...interface{}) {
-	fields := getFields(runtime.Caller(1))
-	log.WithFields(fields).Fatalf(format, v...)
+	//fields := getFields(runtime.Caller(1))
+	//log.WithFields(fields).Fatalf(format, v...)
+	log.Fatalf(format, v...)
 }
 
-var (
-
-	// ConfigError ...
-	ConfigError = "%v type=config.error"
-
-	// HTTPError ...
-	HTTPError = "%v type=http.error"
-
-	// HTTPWarn ...
-	HTTPWarn = "%v type=http.warn"
-
-	// HTTPInfo ...
-	HTTPInfo = "%v type=http.info"
-)
+func GetInstance() *zap.SugaredLogger {
+	return log
+}
 
 func getString(key string) string {
 	//Debugf("Returning item %s", key)
@@ -157,31 +179,21 @@ func getBoolOrDefault(key string, value bool) bool {
 	return viper.GetBool(key)
 }
 
-func getLogLevel() logrus.Level {
+func getLogLevel() zapcore.Level {
 	lvl := strings.ToLower(getStringOrDefault("log.level", "info"))
 	switch lvl {
 	case "info":
-		return logrus.InfoLevel
+		return zapcore.InfoLevel
 	case "debug":
-		return logrus.DebugLevel
-	case "trace":
-		return logrus.TraceLevel
+		return zapcore.DebugLevel
+	case "warn":
+		return zapcore.WarnLevel
 	case "error":
-		return logrus.ErrorLevel
+		return zapcore.ErrorLevel
 	case "fatal":
-		return logrus.FatalLevel
+		return zapcore.FatalLevel
 	default:
-		return logrus.InfoLevel
+		return zapcore.InfoLevel
 
 	}
-}
-func getFields(pc uintptr, file string, line int, ok bool) logrus.Fields {
-	var fields = logrus.Fields{"file": "unknown"}
-	if ok {
-		fields = logrus.Fields{
-			"file": filepath.Base(file),
-			"line": line,
-		}
-	}
-	return fields
 }
